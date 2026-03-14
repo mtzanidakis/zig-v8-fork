@@ -113,14 +113,14 @@ pub fn build(b: *std.Build) !void {
         _ = wf.addCopyFile(.{ .cwd_relative = path }, "libc_v8.a");
         break :blk wf;
     } else blk: {
-        const bootstrapped_depot_tools = try bootstrapDepotTools(b, depot_tools_dir);
+        const bootstrapped_depot_tools = try bootstrapDepotTools(b, depot_tools_dir, is_musl);
         const bootstrapped_v8 = try bootstrapV8(b, bootstrapped_depot_tools, v8_dir, depot_tools_dir, is_musl);
 
         const prepare_step = b.step("prepare-v8", "Prepare V8 source code");
         prepare_step.dependOn(&bootstrapped_v8.step);
 
         // Otherwise, go through build process.
-        break :blk try buildV8(b, v8_dir, depot_tools_dir, bootstrapped_v8, target, gn_args);
+        break :blk try buildV8(b, v8_dir, depot_tools_dir, bootstrapped_v8, target, gn_args, is_musl);
     };
 
     const build_step = b.step("build-v8", "Build v8");
@@ -189,7 +189,7 @@ pub fn build(b: *std.Build) !void {
     }
 }
 
-fn bootstrapDepotTools(b: *std.Build, depot_tools_dir: []const u8) !*std.Build.Step.Run {
+fn bootstrapDepotTools(b: *std.Build, depot_tools_dir: []const u8, is_musl: bool) !*std.Build.Step.Run {
     const depot_tools = b.dependency("depot_tools", .{});
     const marker_file = b.fmt("{s}/.bootstrap-complete", .{depot_tools_dir});
 
@@ -226,15 +226,31 @@ fn bootstrapDepotTools(b: *std.Build, depot_tools_dir: []const u8) !*std.Build.S
     }));
     write_telemetry_config.step.dependOn(&copy_depot_tools.step);
 
-    const ensure_bootstrap = b.addSystemCommand(&.{
-        getDepotToolExePath(b, depot_tools_dir, "ensure_bootstrap"),
-    });
-    ensure_bootstrap.setCwd(.{ .cwd_relative = depot_tools_dir });
-    addDepotToolsToPath(ensure_bootstrap, depot_tools_dir);
-    ensure_bootstrap.step.dependOn(&write_telemetry_config.step);
-
     const create_marker = b.addSystemCommand(&.{ "touch", marker_file });
-    create_marker.step.dependOn(&ensure_bootstrap.step);
+
+    if (is_musl) {
+        // On musl, skip ensure_bootstrap (it downloads glibc-only Python
+        // binaries). Instead, symlink system python3 into depot_tools so
+        // that gclient and autoninja find it.
+        const patch_python = b.addSystemCommand(&.{ "sh", "-c" });
+        patch_python.addArg(b.fmt(
+            "mkdir -p {0s}/python-bin && " ++
+                "ln -sf /usr/bin/python3 {0s}/python-bin/python3 && " ++
+                "ln -sf /usr/bin/python3 {0s}/python3 && " ++
+                "ln -sf /usr/bin/python3 {0s}/vpython3",
+            .{depot_tools_dir},
+        ));
+        patch_python.step.dependOn(&write_telemetry_config.step);
+        create_marker.step.dependOn(&patch_python.step);
+    } else {
+        const ensure_bootstrap = b.addSystemCommand(&.{
+            getDepotToolExePath(b, depot_tools_dir, "ensure_bootstrap"),
+        });
+        ensure_bootstrap.setCwd(.{ .cwd_relative = depot_tools_dir });
+        addDepotToolsToPath(ensure_bootstrap, depot_tools_dir);
+        ensure_bootstrap.step.dependOn(&write_telemetry_config.step);
+        create_marker.step.dependOn(&ensure_bootstrap.step);
+    }
 
     return create_marker;
 }
@@ -428,14 +444,17 @@ fn buildV8(
     bootstrapped_v8: *std.Build.Step.Run,
     target: std.Build.ResolvedTarget,
     gn_args: GnArgs,
+    is_musl: bool,
 ) !*std.Build.Step.WriteFile {
     const v8_dir_lazy_path: LazyPath = .{ .cwd_relative = v8_dir };
 
     const args_string = try gn_args.asString(b, target);
     const out_dir = b.fmt("out/{s}/{s}", .{ @tagName(target.result.os.tag), if (gn_args.is_debug) "debug" else "release" });
 
+    // On musl, use system gn (depot_tools' gn is a glibc binary)
+    const gn_path = if (is_musl) "gn" else getDepotToolExePath(b, depot_tools_dir, "gn");
     const gn_run = b.addSystemCommand(&.{
-        getDepotToolExePath(b, depot_tools_dir, "gn"),
+        gn_path,
         "--root=.",
         "--root-target=//zig",
         "--dotfile=zig/.gn",

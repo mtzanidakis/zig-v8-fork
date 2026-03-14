@@ -34,14 +34,18 @@ jobs:
           apk add --no-cache \
             git curl bash xz python3 \
             build-base clang compiler-rt lld linux-headers \
-            gcompat libstdc++ samurai zig
+            gcompat libstdc++ samurai gn zig
 
           # autoninja looks for 'ninja' in PATH; samurai provides 'samu'
           ln -sf /usr/bin/samu /usr/local/bin/ninja
 
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      # actions/checkout@v4 is a JavaScript action that does not work
+      # inside Alpine containers on ARM runners, so we clone manually.
+      - name: Checkout
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git clone --filter=blob:none https://x-access-token:${{ github.token }}@github.com/${{ github.repository }} "$GITHUB_WORKSPACE"
+          git -C "$GITHUB_WORKSPACE" checkout ${{ github.sha }}
 
       - name: Read V8 version from build.zig
         shell: bash
@@ -67,7 +71,8 @@ jobs:
 
       - name: Upload the build
         if: startsWith(github.ref, 'refs/tags/')
-        uses: ncipollo/release-action@v1
-        with:
-          allowUpdates: true
-          artifacts: libc_v8_*.a
+        shell: bash
+        run: |
+          gh release upload "${{ github.ref_name }}" libc_v8_*.a --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}
