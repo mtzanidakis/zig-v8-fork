@@ -1,0 +1,73 @@
+name: prebuild v8 (musl)
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        type: string
+      arch:
+        type: string
+        description: 'CPU architecture: x86_64 or aarch64'
+      build_type:
+        type: string
+        default: release
+      lp_cache:
+        type: string
+        default: '.lp-cache'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ${{ inputs.runner }}
+    container:
+      image: alpine:3.23
+    env:
+      # Prevent depot_tools from auto-updating or managing its own Python
+      DEPOT_TOOLS_UPDATE: '0'
+      VPYTHON_BYPASS: 'manually managed python not to auto update'
+
+    steps:
+      - name: Install system dependencies
+        run: |
+          apk add --no-cache \
+            git curl bash xz python3 \
+            build-base clang compiler-rt lld linux-headers \
+            gcompat libstdc++ samurai zig
+
+          # autoninja looks for 'ninja' in PATH; samurai provides 'samu'
+          ln -sf /usr/bin/samu /usr/local/bin/ninja
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read V8 version from build.zig
+        shell: bash
+        run: echo "V8_REVISION=$(sed -n 's/^const V8_VERSION.*"\(.*\)".*/\1/p' build.zig)" >> "$GITHUB_ENV"
+
+      - name: Build V8
+        shell: bash
+        run: |
+          if [ "${{ inputs.build_type }}" = "debug" ]; then
+            zig build -Doptimize=Debug -Dis_tsan=true -Dv8_enable_sandbox=true build-v8
+          else
+            zig build -Doptimize=ReleaseSafe build-v8
+          fi
+
+      - name: Rename artifact
+        shell: bash
+        run: |
+          DST="${{ inputs.arch }}"
+          if [ "${{ inputs.build_type }}" = "debug" ]; then
+            DST="${DST}_debug"
+          fi
+          mv "${{ inputs.lp_cache }}/v8-${{ env.V8_REVISION }}/out/linux/${{ inputs.build_type }}/obj/zig/libc_v8.a" "libc_v8_${{ env.V8_REVISION }}_linux-musl_${DST}.a"
+
+      - name: Upload the build
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: ncipollo/release-action@v1
+        with:
+          allowUpdates: true
+          artifacts: libc_v8_*.a
